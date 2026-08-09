@@ -217,7 +217,9 @@ async def _register_one(
     index: int = 0,
 ) -> str | None:
     """单个账号的完整注册流程。返回 api_key 或 None。"""
-    password = generate_password(12)
+    password = config.nvidia.fixed_password or generate_password(12)
+    if config.nvidia.fixed_password:
+        print(f"  [password] 使用固定密码", flush=True)
     reset_captcha_state()  # 重置 sitekey 缓存，确保每个账号独立
 
     # 每账号换 IP: 从 proxy_accounts 轮换账号后缀
@@ -226,7 +228,7 @@ async def _register_one(
 
     launch_kwargs: dict = {
         "headless": config.browser.headless,
-        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-http2"],
     }
     if proxy_url:
         launch_kwargs["proxy"] = {"server": proxy_url}
@@ -246,8 +248,9 @@ async def _register_one(
         print(f"\n[1] Email: {inbox.address}")
 
         # 2. 打开 build.nvidia.com，接受 cookie 弹窗
+        # commit 快速通过, 不等待完整 DOM(代理下重页面渲染慢, 由后续步骤自己等元素)
         print("[2] Opening build.nvidia.com...")
-        await page.goto("https://build.nvidia.com/", wait_until="domcontentloaded", timeout=90000)
+        await page.goto("https://build.nvidia.com/", wait_until="commit", timeout=60000)
         await _accept_cookie_banner(page)
 
         # 3. 点击 Login 打开登录弹窗
@@ -315,7 +318,7 @@ async def _open_signin_modal(page: Page) -> bool:
     """
     try:
         login = page.get_by_role("button", name="Login").first
-        await login.wait_for(state="visible", timeout=10000)
+        await login.wait_for(state="visible", timeout=60000)
         await login.click()
     except Exception:
         pass
@@ -487,14 +490,22 @@ async def _type_verification_code(page: Page, code: str) -> bool:
     return True
 
 async def _click_continue(page: Page) -> bool:
-    """点验证码/同意页的主推进按钮（继续 / 提交）。"""
-    for name in ("继续", "提交"):
+    """点验证码/同意页的主推进按钮（继续 / 提交 / Agree / Accept 等）。"""
+    import re as _re
+    candidates = [
+        page.get_by_role("button", name=_re.compile("submit|继续|提交|agree|accept|allow|同意|允许|下一步|next", _re.IGNORECASE)),
+        page.get_by_role("button", name="Continue"),
+    ]
+    for locator in candidates:
         try:
-            btn = page.get_by_role("button", name=name).first
-            if await btn.count() > 0 and await btn.is_enabled():
-                await btn.click(timeout=5000)
-                print(f"  clicked [{name}]")
-                return True
+            count = await locator.count()
+            for i in range(count):
+                btn = locator.nth(i)
+                if await btn.is_enabled():
+                    text = (await btn.text_content() or "").strip()[:40]
+                    await btn.click(timeout=5000)
+                    print(f"  clicked [{text}]")
+                    return True
         except Exception:
             continue
     return False
@@ -584,10 +595,32 @@ async def finalize_and_create_key(
             await asyncio.sleep(4)
             continue
 
+        # profile-complete 页: 补全 profile(可能需点保存/提交)
+        if "profile-complete" in url_now or "profile_complete" in url_now:
+            print("  profile-complete 页: 尝试点保存/继续...")
+            clicked = False
+            for name in ["保存", "Save", "Continue", "继续", "Submit", "提交"]:
+                try:
+                    btn = page.get_by_role("button", name=name).first
+                    await btn.wait_for(state="visible", timeout=3000)
+                    await btn.click()
+                    clicked = True
+                    print(f"    点击了: {name}")
+                    break
+                except Exception:
+                    continue
+            if not clicked:
+                print("  profile-complete 页无保存按钮, 打印可点元素:")
+                await _print_clickable_snapshot(page)
+            await asyncio.sleep(4)
+            continue
+
         # consent 页 → 点提交
         if "consent" in url_now or "static-login.nvidia.com" in url_now:
             print("  consent 页：点提交...")
-            await _click_continue(page)
+            if not await _click_continue(page):
+                print("  consent 页无可点按钮, 打印可点元素:")
+                await _print_clickable_snapshot(page)
             await asyncio.sleep(3)
             continue
 
@@ -676,25 +709,45 @@ async def _create_key_in_browser(page: Page, org_name: str, config: AppConfig) -
     return None
 
 async def _create_org(page: Page, org_name: str) -> bool:
-    """在 select-account 页填组织名并创建（跳过手机验证的关键）。"""
-    text_input = page.locator('input[type="text"]:visible').first
-    if await text_input.count() == 0:
-        return False
-    await text_input.click()
-    await text_input.fill(org_name)
-    await asyncio.sleep(0.5)
-
-    btn = page.get_by_role("button", name="Create NVIDIA Cloud Account").first
-    try:
-        await btn.wait_for(state="visible", timeout=5000)
-        for _ in range(10):
-            if await btn.is_enabled():
-                await btn.click()
-                print("  clicked [Create NVIDIA Cloud Account]")
-                return True
+    """在 select-account 页填组织名并创建（跳过手机验证的关键）。
+    页面内容可能在 iframe 里, 需遍历 frames 找输入框。"""
+    # 找所有 frame 里的输入框
+    for frame in page.frames:
+        try:
+            text_input = frame.locator('input[type="text"]:visible').first
+            if await text_input.count() == 0:
+                continue
+            await text_input.click()
+            await text_input.fill(org_name)
             await asyncio.sleep(0.5)
-    except Exception:
-        pass
+            btn = frame.get_by_role("button", name="Create NVIDIA Cloud Account").first
+            try:
+                await btn.wait_for(state="visible", timeout=5000)
+                for _ in range(10):
+                    if await btn.is_enabled():
+                        await btn.click()
+                        print("  clicked [Create NVIDIA Cloud Account]")
+                        return True
+                    await asyncio.sleep(0.5)
+            except Exception:
+                pass
+            print(f"  [diag] frame {frame.url[:60]} 有输入框但按钮未找到")
+            return False
+        except Exception:
+            continue
+    # 所有 frame 都没有输入框
+    print("  [diag] select-account 页所有 frame 无 type=text 输入框:")
+    for frame in page.frames:
+        try:
+            inputs = await frame.locator("input").evaluate_all(
+                "els => els.map(e => ({type: e.type, ph: e.placeholder, name: e.name}))"
+            )
+            btns = await frame.get_by_role("button").evaluate_all(
+                "els => els.map(e => ({text: e.textContent.trim().slice(0,30)}))"
+            )
+            print(f"    frame {frame.url[:50]}: inputs={json.dumps(inputs, ensure_ascii=False)[:200]} btns={json.dumps(btns, ensure_ascii=False)[:200]}")
+        except Exception:
+            pass
     return False
 
 async def _close_browser(browser, delay: int) -> None:

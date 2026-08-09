@@ -49,6 +49,7 @@ class NvidiaConfig:
     key_name: str
     account_name: str
     key_expiry_date: str
+    fixed_password: str | None  # 固定密码(留空则随机生成)
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,7 @@ def load_config() -> AppConfig:
             key_name=_get_str(data, "nvidia.key_name", "api"),
             account_name=_get_str(data, "nvidia.account_name", "NVIDIA Build"),
             key_expiry_date=_get_str(data, "nvidia.key_expiry_date", "2126-05-08T08:00:00Z"),
+            fixed_password=_get_str(data, "nvidia.fixed_password", "") or None,
         ),
         browser=BrowserConfig(
             headless=_get_bool(data, "browser.headless", False),
