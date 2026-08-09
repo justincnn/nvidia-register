@@ -171,11 +171,23 @@ class MoeMailProvider:
             resp = requests.get(f"{self.config.api_url}/api/config", headers=self._headers(), timeout=15)
             resp.raise_for_status()
             data = resp.json()
-            # 结构可能是 {"domains": [...]} 或 {"data": {"domains": [...]}}
-            domains = data.get("domains") or (data.get("data") or {}).get("domains") or []
+            # 结构: {"emailDomains": "a.com,b.com,..."} 或 {"domains": [...]} 或 {"data": {...}}
+            raw = (
+                data.get("emailDomains")
+                or data.get("domains")
+                or (data.get("data") or {}).get("emailDomains")
+                or (data.get("data") or {}).get("domains")
+                or ""
+            )
+            if isinstance(raw, str):
+                domains = [d.strip() for d in raw.split(",") if d.strip()]
+            elif isinstance(raw, list):
+                domains = [d for d in raw if isinstance(d, str) and d.strip()]
+            else:
+                domains = []
             if not domains:
                 raise RuntimeError(f"moemail /api/config 未返回域名列表: {data}")
-            self._domains = [d for d in domains if isinstance(d, str)]
+            self._domains = domains
             print(f"  [moemail] 上游可用域名: {', '.join(self._domains)}", flush=True)
         if not self._domains:
             raise RuntimeError("moemail 无可用域名")
