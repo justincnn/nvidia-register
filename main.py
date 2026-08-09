@@ -228,7 +228,16 @@ async def _register_one(
 
     launch_kwargs: dict = {
         "headless": config.browser.headless,
-        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled", "--disable-http2"],
+        "args": [
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-http2",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+        ],
     }
     if proxy_url:
         launch_kwargs["proxy"] = {"server": proxy_url}
@@ -236,6 +245,30 @@ async def _register_one(
 
     browser = await p.chromium.launch(**launch_kwargs)
     page = await browser.new_page(viewport={"width": 1280, "height": 800})
+
+    # ---- Stealth: 抹除自动化指纹(select-account 页 React 检测 webdriver 等特征) ----
+    await page.add_init_script(
+        """
+        // 抹除 webdriver 标记
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        // 伪装语言/平台
+        Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+        Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+        // 抹除 chrome 运行时特征
+        window.chrome = { runtime: {} };
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        Object.defineProperty(navigator, 'mimeTypes', { get: () => [1, 2, 3, 4, 5] });
+        // permissions
+        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (originalQuery) {
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications'
+                    ? Promise.resolve({ state: Notification.permission })
+                    : originalQuery(parameters)
+            );
+        }
+        """
+    )
 
     try:
         # 1. 创建临时邮箱
@@ -591,6 +624,12 @@ async def finalize_and_create_key(
         # 创建组织页（利用组织名跳过手机验证）
         if "select-account" in url_now or "cloudaccounts.nvidia.com" in url_now:
             print("  创建组织页：填组织名...")
+            # 页面是 React SPA, 先等网络空闲/元素出现
+            try:
+                await page.wait_for_load_state("networkidle", timeout=30000)
+            except Exception:
+                pass
+            await asyncio.sleep(3)
             await _create_org(page, config.nvidia.account_name)
             await asyncio.sleep(4)
             continue
@@ -745,7 +784,14 @@ async def _create_org(page: Page, org_name: str) -> bool:
             btns = await frame.get_by_role("button").evaluate_all(
                 "els => els.map(e => ({text: e.textContent.trim().slice(0,30)}))"
             )
+            # 页面 body 文本(判断是否加载失败)
+            body_text = ""
+            try:
+                body_text = (await frame.locator("body").text_content() or "").strip()[:150]
+            except Exception:
+                pass
             print(f"    frame {frame.url[:50]}: inputs={json.dumps(inputs, ensure_ascii=False)[:200]} btns={json.dumps(btns, ensure_ascii=False)[:200]}")
+            print(f"      body: {body_text}")
         except Exception:
             pass
     return False
