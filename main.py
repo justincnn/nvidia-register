@@ -217,9 +217,7 @@ async def _register_one(
     index: int = 0,
 ) -> str | None:
     """单个账号的完整注册流程。返回 api_key 或 None。"""
-    password = config.nvidia.fixed_password or generate_password(12)
-    if config.nvidia.fixed_password:
-        print(f"  [password] 使用固定密码", flush=True)
+    password = generate_password(12)
     reset_captcha_state()  # 重置 sitekey 缓存，确保每个账号独立
 
     # 每账号换 IP: 从 proxy_accounts 轮换账号后缀

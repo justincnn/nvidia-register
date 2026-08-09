@@ -1,77 +1,94 @@
 # nvidia-register
 
-自动注册 NVIDIA BUILD 账号并创建 api key
+自动注册 **NVIDIA BUILD 账号**并创建 **AI_PLAYGROUNDS API Key** 的小工具。
 
-## 功能特点
+> 用大白话说：你提供一个临时邮箱，它帮你自动完成"注册 NVIDIA 账号 → 建组织 → 拿 API Key"的全流程，最后把 `邮箱、密码、Key` 记到 CSV 里。
 
-- **全自动流程**：创建临时邮箱 → 注册 → 过验证码 → 创建组织 → 建 Key → 记录 CSV，全流程自动化
-- **批量注册**：支持单次注册多个账号，交互式询问或 `-n` 参数直接指定
-- **验证码**：支持 手动过验证(`manual`)和全自动过验证(`yescaptcha`、`captcharun`)两种hCaptcha 处理方式
-- **邮箱服务**：支持 `moemail`（自部署，默认）、`cloudflare_temp_email`（自部署）和 `duckmail`（DuckMail API）
-- **代理池**：可选接入 HTTP 代理池（如 Resin），支持启动时连通性预检 + 每账号自动换出口 IP
-- **随机密码**：每次注册自动生成 12 位密码（大小写 + 数字）
-- **自动跳过手机验证**：利用组织名注册跳过手机号要求，并创建长效 API Key
-- **CSV 记录**：每次注册成功立即追加 `email,password,apikey` 到 CSV 文件
-- **随机间隔**：批量注册时账号间随机停顿 20-60 秒（可配置），降低风控风险
-- **优雅退出**：`Ctrl+C` 完成当前账号后安全退出
+---
 
-## 项目结构
+## 它能干什么
+
+- ✅ 自动注册 build.nvidia.com 账号（邮箱验证码全自动）
+- ✅ 自动创建组织（跳过手机号验证）
+- ✅ 自动创建 **AI_PLAYGROUNDS_KEY**（有效期到 2126 年，可调）
+- ✅ 批量注册（`-n 5` 一次 5 个）
+- ✅ 账号间隔随机 20-60 秒，降低风控
+- ✅ 每个账号独立随机密码（12 位，大小写+数字）
+- ✅ 临时邮箱域名随机（不固定一个，防封）
+- ✅ 支持代理池（可选，Resin/GoProxy 等 HTTP 代理）
+
+**拿到 API Key 后**，可以当 OpenAI 兼容接口用：
 
 ```
-├── main.py              # 主入口 + 流程编排
-├── config.py            # 配置加载（config.toml）
-├── email_providers.py   # 临时邮箱服务抽象层
-├── captcha.py           # 验证码处理
-├── passwords.py         # 随机密码生成
-├── records.py           # CSV 记录写入
-├── config.toml          # 配置文件
-└── config.toml.example  # 配置示例
+Base URL: https://integrate.api.nvidia.com/v1
+API Key:  nvapi-xxxxxxxxxxxxxxxx
+模型:     nvidia/llama-3.1-nemotron-70b-instruct 等
 ```
 
-## 前置条件
+---
 
-- Python 3.11+
-- Chromium 浏览器（Playwright 自动下载）
-- **临时邮箱服务**（当前支持 `cloudflare_temp_email` 自部署 和 `duckmail`）
-- （可选）[YesCaptcha](https://yescaptcha.com/i/57yzUt) / [CaptchaRun](https://captcha-run.com/sso?inviter=ad8fbc2f-9721-430e-87a9-1898fa0177b4) 密钥（用于全自动过 hCaptcha）
+## 需要准备什么
+
+| 项目 | 说明 | 必须？ |
+|---|---|---|
+| **moemail 服务** | 临时邮箱 API（自部署），提供 `API URL + API Key` | ✅ |
+| **YesCaptcha 或 CaptchaRun** | 自动过 hCaptcha 验证码服务，提供 client key | ✅ |
+| **Linux 服务器** | 跑脚本用（有显示器也行）| ✅ |
+| Resin/代理池 | 可选，批量时换 IP 防风控 | 可选 |
+
+> moemail 自部署参考：https://github.com/beilunyang/moemail
+> YesCaptcha 注册：https://yescaptcha.com（充几块钱就够跑很久）
+
+---
 
 ## 安装
 
+### 1. 拉代码
+
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+git clone https://github.com/justincnn/nvidia-register.git
+cd nvidia-register
 ```
+
+### 2. 装依赖
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python3 -m playwright install chromium
+```
+
+### 3. 装 xvfb（服务器无显示器必须）
+
+> **为什么必须**：NVIDIA 的 cloudaccounts 页面（创建组织那步）会拦截无头浏览器（headless），页面空白导致注册卡住。用 xvfb 模拟显示器就能正常跑。
+
+```bash
+# Ubuntu/Debian
+sudo apt install -y xvfb
+```
+
+---
 
 ## 配置
 
 ```bash
-# 生成配置文件模板
-python main.py --init
+.venv/bin/python3 main.py --init    # 生成配置模板
 ```
 
-编辑生成的 `config.toml`：
+编辑 `config.toml`：
 
 ```toml
-email_provider = "cloudflare_temp_email"
+email_provider = "moemail"
 
-[cloudflare_temp_email]
-api_url = "https://mail.your-server.com"
-admin_auth = "your_admin_key"
-domain = "your-domain.com"
-
-[duckmail]
-api_url = "https://api.duckmail.sbs"
-domain = "duckmail.sbs"
-api_key = ""
+[moemail]
+api_url = "https://你的moemail域名"
+api_key = "你的moemail管理Key"
+# domain 留空 = 自动从上游获取并随机选择
 
 [captcha]
-mode = "manual" # manual | yescaptcha | captcharun
-yescaptcha_client_key = ""
-yescaptcha_api_url = "https://api.yescaptcha.com"
-captcharun_token = ""
-captcharun_api_url = "https://api.captcha-run.com"
-poll_interval_seconds = 3
-timeout_seconds = 180
+mode = "yescaptcha"        # yescaptcha | captcharun | manual
+yescaptcha_client_key = "你的YesCaptchaKey"
+# captcharun_token = "你的CaptchaRunToken"   # 如果用 captcharun 就填这个
 
 [nvidia]
 output_csv = "accounts.csv"
@@ -80,77 +97,80 @@ account_name = "NVIDIA Build"
 key_expiry_date = "2126-05-08T08:00:00Z"
 
 [browser]
-headless = false
+headless = false           # 必须 false(xvfb 跑), true 会被拦截
 close_delay_seconds = 5
+proxy_enabled = false      # 可选: true 则走代理
+# proxy_url = "http://用户:密码@127.0.0.1:21978"
+# proxy_accounts = ["a", "b", "c"]   # 每账号换 IP 的账号后缀
+interval_min = 20
+interval_max = 60
 ```
 
-| 配置项 | 说明 |
-|--------|------|
-| `email_provider` | 临时邮箱服务类型（支持 `cloudflare_temp_email` / `duckmail`） |
-| `cloudflare_temp_email.api_url` | 邮箱服务 API 地址 |
-| `cloudflare_temp_email.admin_auth` | 邮箱服务管理员密钥 |
-| `cloudflare_temp_email.domain` | 邮箱域名 |
-| `duckmail.api_url` | DuckMail API 地址（默认 `https://api.duckmail.sbs`） |
-| `duckmail.domain` | DuckMail 邮箱域名，例如 `duckmail.sbs` 或你的私有域名 |
-| `duckmail.api_key` | DuckMail 私有域 API Key，使用公共域名时可留空 |
-| `captcha.mode` | `manual` 手动过验证，`yescaptcha` 使用 YesCaptcha API，`captcharun` 使用 CaptchaRun API |
-| `captcha.yescaptcha_client_key` | YesCaptcha 客户端密钥（mode=yescaptcha 时必填） |
-| `captcha.yescaptcha_api_url` | YesCaptcha API 地址（默认 `https://api.yescaptcha.com`） |
-| `captcha.captcharun_token` | CaptchaRun Authorization Token（mode=captcharun 时必填） |
-| `captcha.captcharun_api_url` | CaptchaRun API 地址（默认 `https://api.captcha-run.com`） |
-| `captcha.poll_interval_seconds` | 验证码结果轮询间隔（秒） |
-| `captcha.timeout_seconds` | 验证码等待超时时间（秒） |
-| `nvidia.output_csv` | 记录输出 CSV 文件路径 |
-| `nvidia.key_name` | API Key 名称 |
-| `nvidia.account_name` | 创建组织账户时填入的名称（用于跳过手机验证） |
-| `nvidia.key_expiry_date` | API Key 过期时间（默认 ~100 年） |
-| `browser.headless` | 是否无头模式运行浏览器 |
-| `browser.close_delay_seconds` | 完成后浏览器关闭延迟秒数 |
+---
 
-## 使用
+## 运行
 
 ```bash
-# 交互式询问注册数量
-python main.py
+# 服务器(无显示器) - 必须用 xvfb-run
+xvfb-run -a .venv/bin/python3 main.py -n 1
 
-# 直接指定注册数量（不询问）
-python main.py -n 5
-python main.py --count 3
+# 有显示器的电脑
+.venv/bin/python3 main.py -n 1
+
+# 批量 5 个
+xvfb-run -a .venv/bin/python3 main.py -n 5
 ```
 
-批量注册时每个账号使用独立的浏览器会话，账号间随机停顿 20-60 秒（可用 `interval_min`/`interval_max` 配置）。启用代理时自动进行连通性预检，并可按账号轮换出口 IP。`Ctrl+C` 优雅退出：完成当前正在注册的账号后停止，显示成功/失败汇总。
+**参数**：`-n 数量` 或 `--count 数量`；不加则交互询问。
 
-每次注册成功会自动追加记录到 `accounts.csv`：
+**输出**：每个成功账号追加一行到 `accounts.csv`：
 
 ```csv
 email,password,apikey
-nv12345678@your-domain.com,aB3dE5fG7hI9,nvapi-xxxx...
+nv12345678@xxx.expressai.eu.org,Ab12Cd34Ef56,nvapi-xxxxx
 ```
 
-## 注册流程
+---
+
+## 常见问题 FAQ
+
+### Q1: 注册卡在"创建组织"页（select-account 空白）？
+**原因**：headless 模式被 NVIDIA 拦截。
+**解决**：确认 `config.toml` 里 `headless = false`，并且用 `xvfb-run` 启动。
+
+### Q2: 提示 hCaptcha sitekey 未找到 / 验证码超时？
+检查 `captcha.mode` 和对应 key 是否填对（yescaptcha 填 `yescaptcha_client_key`，captcharun 填 `captcharun_token`）。
+
+### Q3: 邮箱域名一直是一个？
+旧版 bug（固定第一个域名），已修复为随机。确认代码是最新（`git pull`）。
+
+### Q4: 代理开了反而失败/慢？
+NVIDIA 对数据中心 IP 风控较严，代理出口质量差时建议 `proxy_enabled = false` 直连。
+
+### Q5: 批量中途失败了怎么办？
+失败账号自动跳过继续下一个，最终显示"成功 X, 失败 Y"。失败的可以重跑（新邮箱）。
+
+### Q6: 账号密码忘了在哪看？
+CSV 文件里每一行都有 `email,password,apikey`。
+
+---
+
+## 技术原理（简述）
 
 ```
-build.nvidia.com (填邮箱) → login.nvgs.nvidia.com (填密码 + hCaptcha)
-→ 验证码页 (键盘输入) → 同意页 (提交) → 创建组织 (跳过手机验证)
-→ NGC API (建 Key) → CSV 记录
+1. moemail 创建临时邮箱
+2. build.nvidia.com 填邮箱 → 跳转注册页
+3. 填密码 + YesCaptcha 自动过 hCaptcha
+4. moemail 收验证码 → 自动输入
+5. 同意页(consent) → 创建组织(select-account, 跳过手机验证)
+6. 调 NGC API 建 AI_PLAYGROUNDS_KEY
+7. 写入 CSV
 ```
 
-## 扩展邮箱服务
+> 关键点：第 5 步的 select-account 页面必须**非 headless** 才能渲染，这就是为什么用 xvfb。
 
-当前已支持 `cloudflare_temp_email` 和 `duckmail`，后续仍可通过实现 `TempEmailProvider` 协议扩展：
+---
 
-```python
-class TempEmailProvider(Protocol):
-    def create_inbox(self, name: str) -> TempEmailInbox: ...
-    def poll_verification_code(self, inbox: TempEmailInbox, timeout_seconds: int = 180) -> str | None: ...
-```
+## 免责声明
 
-在 `email_providers.py` 中添加新 Provider 并注册到 `build_email_provider()` 即可。
-
-## 注意事项
-
-- hCaptcha **手动模式**必须人工完成验证
-- 注册包含验证码轮询（最长 3 分钟）
-- 浏览器窗口会在完成后自动关闭（可配置延迟）
-- 批量注册时每个账号独立浏览器会话，互不影响
-- 第二次 `Ctrl+C` 强制退出
+本项目仅供学习交流。使用前请确认符合 NVIDIA 服务条款，作者不对因使用本工具导致的账号限制或封禁负责。
