@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import random
 import secrets
 import time
 from dataclasses import dataclass
@@ -191,7 +192,7 @@ class MoeMailProvider:
             print(f"  [moemail] 上游可用域名: {', '.join(self._domains)}", flush=True)
         if not self._domains:
             raise RuntimeError("moemail 无可用域名")
-        return self._domains[0]
+        return random.choice(self._domains)
 
     def create_inbox(self, name: str) -> TempEmailInbox:
         domain = self._get_domain()
