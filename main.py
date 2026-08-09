@@ -23,6 +23,7 @@ Ctrl+C  优雅退出：完成当前正在注册的账号后退出。
 
 import asyncio
 import json
+import random
 import signal
 import sys
 import time
@@ -119,6 +120,14 @@ async def run(config: AppConfig, count: int = 1) -> None:
         # Windows 不支持 add_signal_handler，用 signal.signal 兜底
         signal.signal(signal.SIGINT, lambda *_: _handle_sigint())
 
+    # 代理连通性预检（可选）
+    if config.browser.proxy_enabled and config.browser.proxy_url:
+        print("\n[proxy] 代理连通性预检...")
+        ok = await asyncio.to_thread(_check_proxy_connectivity, config.browser.proxy_url)
+        if not ok:
+            print("[proxy] 预检失败，终止运行。请检查代理配置。")
+            return
+
     success_count = 0
     fail_count = 0
 
@@ -131,35 +140,99 @@ async def run(config: AppConfig, count: int = 1) -> None:
             print(f"# 账号 {i + 1} / {count}")
             print(f"{'#' * 60}")
 
-            api_key = await _register_one(p, config, email_provider, captcha_solver)
+            api_key = await _register_one(p, config, email_provider, captcha_solver, index=i)
             if api_key:
                 success_count += 1
             else:
                 fail_count += 1
 
-            # 非最后一个账号时，间隔一下避免频率限制
+            # 非最后一个账号时，随机停顿 20-60 秒避免风控
             if i < count - 1 and not _shutdown:
-                print("\n  等待 5 秒后注册下一个...")
-                await asyncio.sleep(5)
+                interval = random.randint(config.browser.interval_min, config.browser.interval_max)
+                print(f"\n  随机停顿 {interval} 秒后注册下一个...")
+                await asyncio.sleep(interval)
 
     # 汇总
     print("\n" + "=" * 60)
     print(f"完成! 成功: {success_count}, 失败: {fail_count}, 总计: {success_count + fail_count}")
     print("=" * 60)
 
+# ---------------------------------------------------------------------------
+#  代理支持
+# ---------------------------------------------------------------------------
+
+def _build_proxy_url(config, account_suffix: str | None = None) -> str | None:
+    """根据配置构造代理 URL。account_suffix 非空时替换用户名(每账号换 IP)。"""
+    if not config.browser.proxy_enabled or not config.browser.proxy_url:
+        return None
+    url = config.browser.proxy_url
+    if account_suffix:
+        # 形如 http://user:pass@host:port -> 替换 user 为 user.suffix (Resin 账号维度换 IP)
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+            parts = urlsplit(url)
+            netloc = parts.netloc
+            if "@" in netloc:
+                cred, host = netloc.rsplit("@", 1)
+                user, _, passwd = cred.partition(":")
+                new_cred = f"{user}.{account_suffix}" + (f":{passwd}" if passwd else "")
+                netloc = f"{new_cred}@{host}"
+            url = urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+        except Exception:
+            pass
+    return url
+
+
+def _check_proxy_connectivity(proxy_url: str) -> bool:
+    """代理连通性预检: 通过代理请求 ipify 验证出口可达。"""
+    import requests
+    try:
+        resp = requests.get(
+            "https://api.ipify.org?format=json",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        ip = resp.json().get("ip", "?")
+        print(f"  [proxy] 出口 IP: {ip}", flush=True)
+        return True
+    except Exception as exc:
+        print(f"  [proxy] 连通性预检失败: {exc}", flush=True)
+        return False
+
+
+def _pick_proxy_account(config, index: int) -> str | None:
+    """每账号换 IP: 从 proxy_accounts 列表按 index 轮换。"""
+    accounts = config.browser.proxy_accounts
+    if not accounts:
+        return None
+    return accounts[index % len(accounts)]
+
+
 async def _register_one(
     p,
     config: AppConfig,
     email_provider: TempEmailProvider,
     captcha_solver,
+    index: int = 0,
 ) -> str | None:
     """单个账号的完整注册流程。返回 api_key 或 None。"""
     password = generate_password(12)
     reset_captcha_state()  # 重置 sitekey 缓存，确保每个账号独立
-    browser = await p.chromium.launch(
-        headless=config.browser.headless,
-        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
+
+    # 每账号换 IP: 从 proxy_accounts 轮换账号后缀
+    proxy_account = _pick_proxy_account(config, index)
+    proxy_url = _build_proxy_url(config, proxy_account)
+
+    launch_kwargs: dict = {
+        "headless": config.browser.headless,
+        "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+    }
+    if proxy_url:
+        launch_kwargs["proxy"] = {"server": proxy_url}
+        print(f"  [proxy] 本账号出口: {proxy_url.split('@')[-1]} (账号后缀: {proxy_account or '无'})", flush=True)
+
+    browser = await p.chromium.launch(**launch_kwargs)
     page = await browser.new_page(viewport={"width": 1280, "height": 800})
 
     try:

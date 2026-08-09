@@ -1,4 +1,10 @@
-email_provider = "cloudflare_temp_email" # cloudflare_temp_email | duckmail
+email_provider = "moemail" # moemail | cloudflare_temp_email | duckmail
+
+[moemail]
+api_url = "https://zml.newbiz.eu.org"
+api_key = "YOUR_API_KEY"
+# 邮箱域名(可选, 留空则自动从上游 /api/config 获取)
+domain = ""
 
 [cloudflare_temp_email]
 api_url = ""
@@ -28,3 +34,12 @@ key_expiry_date = "2126-05-08T08:00:00Z"
 [browser]
 headless = false
 close_delay_seconds = 5
+# 代理池(可选, 支持 Resin/GoProxy 等 HTTP 代理)
+proxy_enabled = false
+proxy_url = "http://user:pass@127.0.0.1:21978"
+# 每账号换 IP: Resin 账号后缀列表, 如 ["a","b","c"] -> 生成 user.a/user.b/user.c
+# 需在 Resin 平台下配置多个账号(不同后缀=不同出口 IP)
+proxy_accounts = []
+# 账号间隔随机范围(秒), 默认 20-60
+interval_min = 20
+interval_max = 60

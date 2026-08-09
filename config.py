@@ -19,6 +19,13 @@ class CloudflareTempEmailConfig:
 
 
 @dataclass(frozen=True)
+class MoeMailConfig:
+    api_url: str
+    api_key: str
+    domain: str | None  # None = 自动从上游 /api/config 获取
+
+
+@dataclass(frozen=True)
 class DuckMailConfig:
     api_url: str
     domain: str
@@ -48,12 +55,20 @@ class NvidiaConfig:
 class BrowserConfig:
     headless: bool
     close_delay_seconds: int
+    proxy_enabled: bool
+    proxy_url: str | None
+    # 代理账号后缀列表(每账号换 IP): 如 ["nv.a","nv.b","nv.c"] -> 自动轮换
+    proxy_accounts: list[str] | None
+    # 账号间隔随机范围(秒)
+    interval_min: int
+    interval_max: int
 
 
 @dataclass(frozen=True)
 class AppConfig:
     email_provider: str
     cloudflare_temp_email: CloudflareTempEmailConfig
+    moemail: MoeMailConfig
     duckmail: DuckMailConfig
     captcha: CaptchaConfig
     nvidia: NvidiaConfig
@@ -98,6 +113,17 @@ def _get_bool(data: dict[str, Any], path: str, default: bool) -> bool:
     return current if isinstance(current, bool) else default
 
 
+def _get_list(data: dict[str, Any], path: str) -> list[str] | None:
+    current: Any = data
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    if isinstance(current, list) and all(isinstance(x, str) and x.strip() for x in current):
+        return [x.strip() for x in current]
+    return None
+
+
 def _resolve_path(value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else SCRIPT_DIR / path
@@ -108,7 +134,13 @@ def init_config() -> None:
         print(f"Config already exists: {CONFIG_FILE}")
         return
     template = """
-email_provider = "cloudflare_temp_email"
+email_provider = "moemail"
+
+[moemail]
+api_url = "https://zml.newbiz.eu.org"
+api_key = "YOUR_API_KEY"
+# 邮箱域名(可选, 留空则自动从上游 /api/config 获取)
+domain = ""
 
 [cloudflare_temp_email]
 api_url = ""
@@ -138,6 +170,15 @@ key_expiry_date = "2126-05-08T08:00:00Z"
 [browser]
 headless = false
 close_delay_seconds = 5
+# 代理池(可选, 支持 Resin/GoProxy 等 HTTP 代理)
+proxy_enabled = false
+proxy_url = "http://user:pass@127.0.0.1:21978"
+# 每账号换 IP: Resin 账号后缀列表, 如 ["a","b","c"] -> 生成 user.a/user.b/user.c
+# 需在 Resin 平台下配置多个账号(不同后缀=不同出口 IP)
+proxy_accounts = []
+# 账号间隔随机范围(秒), 默认 20-60
+interval_min = 20
+interval_max = 60
 """
     CONFIG_FILE.write_text(template, encoding="utf-8")
     print(f"Created {CONFIG_FILE}")
@@ -153,10 +194,11 @@ def load_config() -> AppConfig:
         data = tomllib.load(file)
 
     email_provider = _get_str(data, "email_provider", "cloudflare_temp_email").lower()
-    if email_provider not in {"cloudflare_temp_email", "duckmail"}:
+    if email_provider not in {"cloudflare_temp_email", "moemail", "duckmail"}:
         raise ValueError(f"Unsupported email_provider: {email_provider}")
 
     use_cloudflare_temp_email = email_provider == "cloudflare_temp_email"
+    use_moemail = email_provider == "moemail"
     use_duckmail = email_provider == "duckmail"
 
     cloudflare_api_url = (
@@ -174,6 +216,19 @@ def load_config() -> AppConfig:
         if use_cloudflare_temp_email
         else _get_str(data, "cloudflare_temp_email.domain", "")
     )
+
+    moemail_api_url = (
+        _require_str(data, "moemail.api_url")
+        if use_moemail
+        else _get_str(data, "moemail.api_url", "https://zml.newbiz.eu.org")
+    ).rstrip("/")
+    moemail_api_key = (
+        _require_str(data, "moemail.api_key")
+        if use_moemail
+        else _get_str(data, "moemail.api_key", "")
+    )
+    # 域名可选: 留空则运行时从上游 /api/config 自动获取
+    moemail_domain = _get_str(data, "moemail.domain", "") or None
 
     duckmail_domain = (
         _require_str(data, "duckmail.domain")
@@ -199,6 +254,11 @@ def load_config() -> AppConfig:
             admin_auth=cloudflare_admin_auth,
             domain=cloudflare_domain,
         ),
+        moemail=MoeMailConfig(
+            api_url=moemail_api_url,
+            api_key=moemail_api_key,
+            domain=moemail_domain,
+        ),
         duckmail=DuckMailConfig(
             api_url=_get_str(data, "duckmail.api_url", "https://api.duckmail.sbs").rstrip("/"),
             domain=duckmail_domain,
@@ -222,6 +282,11 @@ def load_config() -> AppConfig:
         browser=BrowserConfig(
             headless=_get_bool(data, "browser.headless", False),
             close_delay_seconds=_get_int(data, "browser.close_delay_seconds", 10),
+            proxy_enabled=_get_bool(data, "browser.proxy_enabled", False),
+            proxy_url=_get_str(data, "browser.proxy_url", "") or None,
+            proxy_accounts=_get_list(data, "browser.proxy_accounts"),
+            interval_min=_get_int(data, "browser.interval_min", 20),
+            interval_max=_get_int(data, "browser.interval_max", 60),
         ),
     )
 
@@ -230,6 +295,9 @@ def describe_config(config: AppConfig) -> None:
     if config.email_provider == "cloudflare_temp_email":
         email_api = config.cloudflare_temp_email.api_url
         email_domain = config.cloudflare_temp_email.domain
+    elif config.email_provider == "moemail":
+        email_api = config.moemail.api_url
+        email_domain = config.moemail.domain or "(auto)"
     else:
         email_api = config.duckmail.api_url
         email_domain = config.duckmail.domain
@@ -238,5 +306,9 @@ def describe_config(config: AppConfig) -> None:
     print(f"  EMAIL_API:      {email_api}")
     print(f"  EMAIL_DOMAIN:   {email_domain}")
     print(f"  CAPTCHA_MODE:   {config.captcha.mode}")
+    if config.browser.proxy_enabled:
+        print(f"  PROXY:          {config.browser.proxy_url}")
+        if config.browser.proxy_accounts:
+            print(f"  PROXY_ACCOUNTS: {len(config.browser.proxy_accounts)} 个(每账号轮换)")
     print(f"  OUTPUT_CSV:     {config.nvidia.output_csv}")
     print(f"  CONFIG_FILE:    {CONFIG_FILE}")

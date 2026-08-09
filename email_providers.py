@@ -8,7 +8,7 @@ from typing import Protocol
 
 import requests
 
-from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig
+from config import AppConfig, CloudflareTempEmailConfig, DuckMailConfig, MoeMailConfig
 
 
 @dataclass(frozen=True)
@@ -143,6 +143,96 @@ class DuckMailProvider:
         return headers
 
 
+class MoeMailProvider:
+    """moemail (https://github.com/beilunyang/moemail) 临时邮箱。
+
+    API:
+      GET  /api/config                  获取系统配置(含可用域名列表)
+      POST /api/emails/generate         生成临时邮箱
+      GET  /api/emails/{emailId}        获取邮件列表
+      GET  /api/emails/{emailId}/{messageId}  获取单封邮件
+    """
+
+    def __init__(self, config: MoeMailConfig):
+        self.config = config
+        self._domains: list[str] | None = None
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "X-API-Key": self.config.api_key,
+            "Content-Type": "application/json",
+        }
+
+    def _get_domain(self) -> str:
+        """返回邮箱域名: 优先配置值, 否则从上游 /api/config 获取。"""
+        if self.config.domain:
+            return self.config.domain
+        if self._domains is None:
+            resp = requests.get(f"{self.config.api_url}/api/config", headers=self._headers(), timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            # 结构可能是 {"domains": [...]} 或 {"data": {"domains": [...]}}
+            domains = data.get("domains") or (data.get("data") or {}).get("domains") or []
+            if not domains:
+                raise RuntimeError(f"moemail /api/config 未返回域名列表: {data}")
+            self._domains = [d for d in domains if isinstance(d, str)]
+            print(f"  [moemail] 上游可用域名: {', '.join(self._domains)}", flush=True)
+        if not self._domains:
+            raise RuntimeError("moemail 无可用域名")
+        return self._domains[0]
+
+    def create_inbox(self, name: str) -> TempEmailInbox:
+        domain = self._get_domain()
+        resp = requests.post(
+            f"{self.config.api_url}/api/emails/generate",
+            headers=self._headers(),
+            json={"name": name, "expiryTime": 3600000, "domain": domain},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # 响应可能包在 data 里
+        payload = data.get("data") or data
+        email_id = payload.get("id") or payload.get("emailId") or payload.get("_id")
+        address = payload.get("address") or payload.get("email")
+        if not email_id or not address:
+            raise RuntimeError(f"moemail 创建邮箱失败: {data}")
+        return TempEmailInbox(address=address, token=str(email_id))
+
+    def poll_verification_code(self, inbox: TempEmailInbox, timeout_seconds: int = 180) -> str | None:
+        deadline = time.time() + timeout_seconds
+        email_id = inbox.token
+        while time.time() < deadline:
+            try:
+                resp = requests.get(
+                    f"{self.config.api_url}/api/emails/{email_id}",
+                    headers=self._headers(),
+                    timeout=15,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                messages = data.get("messages") or (data.get("data") or {}).get("messages") or []
+                for msg in messages:
+                    message_id = msg.get("id") or msg.get("messageId") or msg.get("_id")
+                    if not message_id:
+                        continue
+                    detail_resp = requests.get(
+                        f"{self.config.api_url}/api/emails/{email_id}/{message_id}",
+                        headers=self._headers(),
+                        timeout=15,
+                    )
+                    detail_resp.raise_for_status()
+                    detail = detail_resp.json()
+                    body = detail.get("text") or detail.get("html") or detail.get("raw") or str(detail)
+                    code = _extract_verification_code(str(body))
+                    if code:
+                        return code
+            except Exception as exc:
+                print(f"  email poll: {exc}", flush=True)
+            time.sleep(2)
+        return None
+
+
 def _extract_verification_code(raw_message: str) -> str | None:
     clean = re.sub(r"=\r?\n", "", raw_message)
     index = clean.lower().find("verification code")
@@ -177,6 +267,8 @@ def _duckmail_message_body(detail: dict) -> str:
 def build_email_provider(config: AppConfig) -> TempEmailProvider:
     if config.email_provider == "cloudflare_temp_email":
         return CloudflareTempEmailProvider(config.cloudflare_temp_email)
+    if config.email_provider == "moemail":
+        return MoeMailProvider(config.moemail)
     if config.email_provider == "duckmail":
         return DuckMailProvider(config.duckmail)
     raise ValueError(f"Unsupported email provider: {config.email_provider}")
