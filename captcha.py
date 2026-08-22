@@ -274,6 +274,8 @@ class LocalVlmSolver:
     async def solve(self, page: Page) -> bool:
         print("\n[2/4] Solving hCaptcha with local VLM (free, self-hosted)...")
         await self._maybe_checkbox_pass(page)
+        # 等真正的挑战渲染出来(每次 getcaptcha/挑战JS完成加载)再轮询, 避免在任务出现前耗尽轮次
+        await _wait_for_challenge_loaded(page)
         for rnd in range(6):
             if await _is_register_button_enabled(page):
                 print(f"  register enabled after {rnd} round(s)")
@@ -412,6 +414,27 @@ async def _solve_canvas(page, solver, prompt: str, max_attrs: int = 4) -> bool:
     canvas, cbox = await _find_canvas(page)
     if not canvas:
         print("  [canvas] no canvas found (tile/non-canvas challenge?)")
+        # 未知型: 一次性 dump 真实 DOM 结构到 /tmp 定位真实选择器
+        if not _SOLVE_CANVAS_DUMPED["done"]:
+            _SOLVE_CANVAS_DUMPED["done"] = True
+            try:
+                lines = []
+                for fi, f in enumerate(_hcaptcha_frames(page)):
+                    try:
+                        info = await f.evaluate(
+                            "() => { let r={tags:{},imgs:0,canvas:0,sels:[]}; "
+                            "document.querySelectorAll('*').forEach(e=>{const t=e.tagName||'';r.tags[t]=(r.tags[t]||0)+1;"
+                            "const c=e.className||'';if(c&&c.length<40&&/task|tile|option|challenge|grid|puzzle/.test(c))"
+                            "r.sigs.push(t+'.'+c);});r.imgs=document.images.length;r.canvas=document.querySelectorAll('canvas').length;"
+                            "r.sigs=[...new Set(r.sigs)].slice(0,25);return r;}")
+                        lines.append(f"[{fi}] url={f.url[:70]} canvas={info['canvas']} imgs={info['imgs']} "
+                                     f"tags={info['tags']} sigs={info['sigs']}")
+                    except Exception as e:
+                        lines.append(f"[{fi}] err {e}")
+                open("/tmp/hc_unknown.txt", "w").write("\n".join(lines))
+                print("  [canvas] DOM dump -> /tmp/hc_unknown.txt")
+            except Exception as ex:
+                print("  [canvas] dump err", ex)
         return False
     print(f"  [canvas] found {cbox['width']:.0f}x{cbox['height']:.0f} type={_current_challenge_type}")
     w, h = cbox["width"], cbox["height"]
@@ -475,6 +498,7 @@ def _hcaptcha_frames(page: Page):
 
 # --- canvas 挑战: VLM bbox 定位 + 拖拽/框选 / 点选 ---------------------------
 _current_challenge_type: str | None = None  # "image_drag_drop" / "image_label_area_select" / ...
+_SOLVE_CANVAS_DUMPED = {"done": False}  # 一次性未知型 DOM dump 标记
 
 def _listen_challenge_type(page) -> None:
     """记录 hCaptcha 挑战类型(从加载的 challenge.js 路径识别), 供 canvas 求解分流。"""
@@ -488,7 +512,10 @@ def _listen_challenge_type(page) -> None:
                 print(f"  [challenge] type = {_current_challenge_type}")
     page.on("request", _on_request)
 
-TILE_SELECTS = [".option", ".option img", "[class*=task] img", "[class*=image] img", "img"]
+TILE_SELECTS = [
+    "label-td, label-tc", ".option", ".option img",
+    "[class*=task] img", "[class*=image] img", "img",
+]
 
 
 async def _click_hcaptcha_checkbox(frame) -> bool:
@@ -521,6 +548,22 @@ async def _tile_elements(frame):
         if good:
             return good
     return []
+
+
+async def _wait_for_challenge_loaded(page: Page) -> None:
+    """轮询直到出现 canvas 或 >=2 个 tile(真挑战渲染), 最多 ~10s。防 6 轮在任务出现前耗尽。"""
+    for _ in range(20):
+        canvas, _ = await _find_canvas(page)
+        if canvas:
+            return
+        for f in _hcaptcha_frames(page):
+            try:
+                els = await _tile_elements(f)
+                if len(els) >= 2:
+                    return
+            except Exception:
+                pass
+        await asyncio.sleep(0.5)
 
 
 async def _find_challenge(page: Page):
@@ -580,6 +623,25 @@ async def _solve_challenge_page(page, solver) -> bool:
 
     prompt = await _extract_prompt(frame)
     print(f"  [challenge] prompt: {prompt!r}")
+
+    # checkbox/“我是人类” 语义: 点复选框而非图 tile (避免 matches:[] 空转循环)
+    p_low = (prompt or "").lower()
+    if ("human" in p_low or p_low in ("i am not a robot", "i'm human", "i am human") or "checkbox" in p_low):
+        for f in _hcaptcha_frames(page):
+            if await _click_hcaptcha_checkbox(f):
+                print("  [challenge] clicked checkbox for 'I am human'")
+                for _ in range(8):
+                    if await _is_register_button_enabled(page):
+                        return True
+                    await asyncio.sleep(0.8)
+                break
+        clicked = await _click_verify_button(page)
+        print(f"  [challenge] verify after checkbox: {clicked}" if clicked else "  [challenge] no verify btn")
+        for _ in range(8):
+            if await _is_register_button_enabled(page):
+                return True
+            await asyncio.sleep(1)
+        return False
 
     b64s: list[str] = []
     for i, loc in enumerate(tile_els):
@@ -641,6 +703,7 @@ def reset_captcha_state() -> None:
     global _captured_sitekey, _current_challenge_type
     _captured_sitekey = None
     _current_challenge_type = None
+    _SOLVE_CANVAS_DUMPED["done"] = False
 
 
 def start_capturing_sitekey(page: Page) -> None:
