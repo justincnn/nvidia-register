@@ -39,6 +39,9 @@ class CaptchaConfig:
     yescaptcha_api_url: str
     captcharun_token: str | None
     captcharun_api_url: str
+    local_vlm_base_url: str
+    local_vlm_api_key: str
+    local_vlm_model: str
     poll_interval_seconds: int
     timeout_seconds: int
 
@@ -239,8 +242,8 @@ def load_config() -> AppConfig:
     duckmail_api_key = _get_str(data, "duckmail.api_key", "") or None
 
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
-    if captcha_mode not in {"manual", "free", "yescaptcha", "captcharun"}:
-        raise ValueError("captcha.mode must be 'manual', 'free', 'yescaptcha' or 'captcharun'")
+    if captcha_mode not in {"manual", "free", "yescaptcha", "captcharun", "local-vlm"}:
+        raise ValueError("captcha.mode must be 'manual', 'free', 'yescaptcha', 'captcharun' or 'local-vlm'")
     yescaptcha_client_key = _get_str(data, "captcha.yescaptcha_client_key", "") or None
     if captcha_mode == "yescaptcha" and not yescaptcha_client_key:
         raise ValueError("captcha.yescaptcha_client_key is required when captcha.mode = 'yescaptcha'")
@@ -271,6 +274,9 @@ def load_config() -> AppConfig:
             yescaptcha_api_url=_get_str(data, "captcha.yescaptcha_api_url", "https://api.yescaptcha.com").rstrip("/"),
             captcharun_token=captcharun_token,
             captcharun_api_url=_get_str(data, "captcha.captcharun_api_url", "https://api.captcha-run.com").rstrip("/"),
+            local_vlm_base_url=_get_str(data, "captcha.local_vlm_base_url", "https://api.siliconflow.cn/v1").rstrip("/"),
+            local_vlm_api_key=_get_str(data, "captcha.local_vlm_api_key", ""),
+            local_vlm_model=_get_str(data, "captcha.local_vlm_model", "Qwen/Qwen3-VL-8B-Instruct"),
             poll_interval_seconds=_get_int(data, "captcha.poll_interval_seconds", 3),
             timeout_seconds=_get_int(data, "captcha.timeout_seconds", 180),
         ),
