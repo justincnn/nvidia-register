@@ -239,8 +239,8 @@ def load_config() -> AppConfig:
     duckmail_api_key = _get_str(data, "duckmail.api_key", "") or None
 
     captcha_mode = _get_str(data, "captcha.mode", "manual").lower()
-    if captcha_mode not in {"manual", "yescaptcha", "captcharun"}:
-        raise ValueError("captcha.mode must be 'manual', 'yescaptcha' or 'captcharun'")
+    if captcha_mode not in {"manual", "free", "yescaptcha", "captcharun"}:
+        raise ValueError("captcha.mode must be 'manual', 'free', 'yescaptcha' or 'captcharun'")
     yescaptcha_client_key = _get_str(data, "captcha.yescaptcha_client_key", "") or None
     if captcha_mode == "yescaptcha" and not yescaptcha_client_key:
         raise ValueError("captcha.yescaptcha_client_key is required when captcha.mode = 'yescaptcha'")

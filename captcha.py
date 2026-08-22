@@ -29,6 +29,83 @@ class ManualCaptchaSolver:
         return False
 
 
+class FreeClickSolver:
+    """零成本方案: 直接点击 hCaptcha checkbox。
+
+    原理: hCaptcha 在指纹/IP 干净时, checkbox 点击即过(不弹图片九宫格)。
+    失败表现: 点击后弹出图片挑战 -> 判定失败, 由上层换代理后缀重试。
+    """
+
+    async def solve(self, page: Page) -> bool:
+        print("\n[2/4] Solving hCaptcha by clicking checkbox (free)...")
+        # 1. 等待 hCaptcha iframe 出现
+        frame = None
+        for i in range(15):
+            for f in page.frames:
+                if "hcaptcha" in f.url:
+                    frame = f
+                    print(f"  found hcaptcha frame: {f.url[:100]}")
+                    break
+            if frame:
+                break
+            await asyncio.sleep(1)
+        if not frame:
+            # 可能验证码未加载或已自动通过 -> 直接检查按钮
+            if await _is_register_button_enabled(page):
+                print("  register button already enabled (no captcha needed)")
+                return True
+            # 诊断: 打印所有 frame + 当前页 URL
+            print("  hCaptcha iframe not found. All frames:")
+            for f in page.frames:
+                print(f"    - {f.url[:100]}")
+            return False
+
+        # 诊断: dump iframe 关键内容 (checkbox vs challenge)
+        try:
+            info = await frame.evaluate("""() => {
+                const els = document.querySelectorAll('div,span,button,input,iframe');
+                const out = [];
+                for (const el of els) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 30 && r.height > 15 && r.width < 600) {
+                        out.push({tag: el.tagName, id: el.id, cls: (el.className||'').toString().slice(0,45),
+                                  role: el.getAttribute('role'), text: (el.textContent||'').trim().slice(0,30)});
+                    }
+                }
+                return out.slice(0, 30);
+            }""")
+            print("  iframe 元素:")
+            for el in info:
+                print("    ", el)
+        except Exception as e:
+            print("  iframe dump err:", e)
+
+        # 2. 点击 checkbox (两种常见选择器)
+        clicked = False
+        for selector in ["#checkbox", ".checkbox", "div[role='checkbox']"]:
+            try:
+                el = await frame.query_selector(selector)
+                if el:
+                    await el.click()
+                    clicked = True
+                    print(f"  clicked checkbox ({selector})")
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            print("  checkbox element not found in iframe")
+            return False
+
+        # 3. 等待注册按钮亮起(最多 60s; 若弹图片挑战则按钮不会亮)
+        for i in range(60):
+            if await _is_register_button_enabled(page):
+                print(f"  hCaptcha checkbox passed ({i}s) — FREE")
+                return True
+            await asyncio.sleep(1)
+        print("  checkbox clicked but challenge appeared / button stayed disabled")
+        return False
+
+
 @dataclass(frozen=True)
 class YesCaptchaSolver:
     client_key: str
@@ -201,9 +278,12 @@ def start_capturing_sitekey(page: Page) -> None:
     """
     def _on_request(req):
         global _captured_sitekey
+        url = req.url
+        # 调试: 打印所有验证码相关请求
+        if any(k in url for k in ["captcha", "checksiteconfig", "hsw", "getcaptcha"]):
+            print(f"  [req] {url[:160]}", flush=True)
         if _captured_sitekey:
             return
-        url = req.url
         if "checksiteconfig" in url and "sitekey=" in url:
             try:
                 sk = parse_qs(urlparse(url).query).get("sitekey", [None])[0]
@@ -217,13 +297,31 @@ def start_capturing_sitekey(page: Page) -> None:
 
 
 async def _get_site_key(page: Page) -> str | None:
-    """获取 sitekey（仅从网络请求缓存中读取）。"""
+    """获取 sitekey：先读网络捕获缓存，再兜底从 DOM/hCaptcha iframe 读取。"""
+    global _captured_sitekey
     if _captured_sitekey:
         return _captured_sitekey
     # 等待网络请求捕获（hCaptcha iframe 可能还在加载）
-    for _ in range(30):
+    for _ in range(15):
         if _captured_sitekey:
             return _captured_sitekey
+        # 兜底1: 从 iframe src 或页面 data attr 读 sitekey
+        try:
+            sk = await page.evaluate("""() => {
+                const f = document.querySelector('iframe[src*="hcaptcha.com"]');
+                const src = f && f.getAttribute('src') || '';
+                const m = src.match(/sitekey=([a-f0-9-]{20,})/);
+                if (m) return m[1];
+                const el = document.querySelector('[data-sitekey]');
+                if (el && el.getAttribute('data-sitekey')) return el.getAttribute('data-sitekey');
+                return null;
+            }""")
+            if sk:
+                _captured_sitekey = sk
+                print(f"  sitekey captured (DOM): {sk}")
+                return sk
+        except Exception:
+            pass
         await asyncio.sleep(1)
     return None
 
@@ -291,6 +389,8 @@ def _extract_hcaptcha_token(data: dict[str, Any]) -> str | None:
 def build_captcha_solver(config: CaptchaConfig) -> CaptchaSolver:
     if config.mode == "manual":
         return ManualCaptchaSolver()
+    if config.mode == "free":
+        return FreeClickSolver()
     if config.mode == "yescaptcha":
         if not config.yescaptcha_client_key:
             raise ValueError("yescaptcha_client_key is required")

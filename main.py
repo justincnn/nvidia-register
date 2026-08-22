@@ -140,7 +140,21 @@ async def run(config: AppConfig, count: int = 1) -> None:
             print(f"# 账号 {i + 1} / {count}")
             print(f"{'#' * 60}")
 
-            api_key = await _register_one(p, config, email_provider, captcha_solver, index=i)
+            api_key = None
+            max_tries = 3  # 代理不稳时换后缀重试(后缀由 index+try 偏移轮换)
+            for attempt in range(max_tries):
+                if _shutdown:
+                    break
+                if attempt > 0:
+                    print(f"\n  [retry] 账号 {i+1} 第 {attempt+1} 次尝试(换代理后缀)...")
+                try:
+                    api_key = await _register_one(p, config, email_provider, captcha_solver, index=i + attempt)
+                except Exception as exc:
+                    print(f"  [error] 注册流程异常: {type(exc).__name__}: {str(exc)[:120]}")
+                    api_key = None
+                if api_key:
+                    break
+                await asyncio.sleep(10)  # 重试前短暂冷却
             if api_key:
                 success_count += 1
             else:
@@ -238,7 +252,14 @@ async def _register_one(
         ],
     }
     if proxy_url:
-        launch_kwargs["proxy"] = {"server": proxy_url}
+        # Playwright 需把认证拆开传(username/password 字段), URL 内嵌会被拒(407)
+        from urllib.parse import urlsplit
+        pu = urlsplit(proxy_url)
+        launch_kwargs["proxy"] = {
+            "server": f"{pu.scheme}://{pu.hostname}:{pu.port}",
+            "username": pu.username or "",
+            "password": pu.password or "",
+        }
         print(f"  [proxy] 本账号出口: {proxy_url.split('@')[-1]} (账号后缀: {proxy_account or '无'})", flush=True)
 
     browser = await p.chromium.launch(**launch_kwargs)
