@@ -34,7 +34,8 @@ class CloudflareTempEmailProvider:
         response = requests.post(
             f"{self.config.api_url}/admin/new_address",
             headers={"x-admin-auth": self.config.admin_auth, "Content-Type": "application/json"},
-            json={"name": name, "domain": self.config.domain, "enablePrefix": False},
+            json={"name": name, "domain": self.config.domain, "enablePrefix": False,
+                  "enableRandomSubdomain": True},
             timeout=15,
         )
         response.raise_for_status()

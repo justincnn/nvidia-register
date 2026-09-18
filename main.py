@@ -24,6 +24,7 @@ Ctrl+C  优雅退出：完成当前正在注册的账号后退出。
 import asyncio
 import json
 import random
+import re
 import signal
 import sys
 import time
@@ -369,7 +370,7 @@ async def _open_signin_modal(page: Page) -> bool:
     实测：点 Login 后先出现临时弹窗，1~2 秒后页面自动刷新出真正有效弹窗。
     """
     try:
-        login = page.get_by_role("button", name="Login").first
+        login = page.get_by_role("button", name=re.compile(r"^Login")).first
         await login.wait_for(state="visible", timeout=60000)
         await login.click()
     except Exception:
